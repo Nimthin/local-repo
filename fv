@@ -1,0 +1,106 @@
+import os
+import pandas as pd
+import re
+from bertopic import BERTopic
+from sentence_transformers import SentenceTransformer
+from umap import UMAP
+from sklearn.feature_extraction.text import CountVectorizer, ENGLISH_STOP_WORDS
+from llama_cpp import Llama
+
+# === Load Local LLaMA3 model ===
+llm = Llama(
+    model_path="models/llama3-8b-4bit.gguf",  # Update to your local model path
+    n_ctx=2048,
+    n_threads=8
+)
+
+def generate_topic_name(keywords: str) -> str:
+    prompt = f"""
+You are an expert assistant specializing in summarizing customer complaint themes from social media data in the fashion e-commerce industry.
+
+Your task is to generate a clear, concise, and meaningful topic name based on a list of keywords extracted from tweets. These tweets are complaints directed at a fashion brand's official Twitter handle and typically mention issues related to orders, products, customer service, app experience, and delivery.
+
+Requirements:
+- The topic name should be between 2 to 5 words.
+- It should be specific to fashion brand-related complaints or fashion e-commerce.
+- Avoid vague or generic names like "Other" unless the keywords are irrelevant or nonsensical.
+- Do NOT include any explanations, quotes, or punctuation—only output the topic name.
+- Use Title Case (capitalize the first letter of each word).
+
+Output only the topic name on a single line with no other text.
+
+Now, generate a topic name for these keywords:
+
+{keywords}
+""".strip()
+
+    response = llm(prompt, max_tokens=30, stop=["\n"])
+    return response["choices"][0]["text"].strip()
+
+
+# === Load Excel and clean tweets ===
+df = pd.read_excel("Twitter - Next.xlsx")
+tweets_cleaned = df["Tweet"].dropna().astype(str).tolist()
+
+def clean_tweet(text):
+    text = re.sub(r'nextofficial', '', text, flags=re.IGNORECASE)
+    text = re.sub(r"http\S+|@\w+|#\w+|[^A-Za-z0-9\s]", "", text)
+    return text.lower().strip()
+
+tweets = [clean_tweet(tweet) for tweet in tweets_cleaned]
+
+# === Stopwords and Vectorizer ===
+custom_stopwords = set(ENGLISH_STOP_WORDS)
+custom_stopwords.update(["nextofficial"])
+
+vectorizer_model = CountVectorizer(stop_words=list(custom_stopwords))
+
+# === Embedding and BERTopic Setup ===
+embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
+umap_model = UMAP(n_neighbors=15, n_components=5, min_dist=0.0, metric='cosine')
+
+topic_model = BERTopic(
+    embedding_model=embedding_model,
+    umap_model=umap_model,
+    vectorizer_model=vectorizer_model,
+    verbose=True,
+    language="english",
+    calculate_probabilities=True,
+    min_topic_size=5
+)
+
+# === Fit BERTopic ===
+topics, probs = topic_model.fit_transform(tweets)
+df["Topic"] = topics
+
+# === Generate Topic Names ===
+topic_labels = {}
+for tid in set(topics):
+    if tid == -1:
+        topic_labels[tid] = "Other"
+        print(f"Topic {tid}: Marked as 'Other' (no meaningful cluster)")
+        continue
+
+    topic_words = topic_model.get_topic(tid)
+    if topic_words:
+        keywords = ", ".join([word for word, _ in topic_words[:5]])
+        print(f"\nGenerating name for Topic {tid} with keywords: {keywords}")
+        try:
+            topic_name = generate_topic_name(keywords)
+            print(f"→ Topic {tid} Named: {topic_name}")
+        except Exception as e:
+            print(f"⚠️ Failed to generate topic name for topic {tid}: {e}")
+            topic_name = "Other"
+        topic_labels[tid] = topic_name
+    else:
+        topic_labels[tid] = "Other"
+        print(f"Topic {tid} has no keywords. Marking as 'Other'.")
+
+df["Topic Name"] = df["Topic"].map(topic_labels)
+
+# === Save results ===
+df.to_excel("Twitter_Next_Topics_Labeled.xlsx", index=False)
+
+# === Print summaries ===
+print(topic_model.get_topic_info())
+print(df[['Topic', 'Topic Name']].drop_duplicates())
