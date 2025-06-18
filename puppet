@@ -1,0 +1,107 @@
+const puppeteer = require('puppeteer');
+const XLSX = require('xlsx');
+const fs = require('fs-extra');
+
+const TWITTER_USERNAME = 'hehehehemz17680';
+const TWITTER_PASSWORD = 'Qwerty@123';
+const MAX_TWEETS = 200;
+
+(async () => {
+  const browser = await puppeteer.launch({
+    headless: false,
+    args: ['--start-maximized'],
+    defaultViewport: null
+  });
+
+  const page = await browser.newPage();
+  await page.goto('https://x.com/login', { waitUntil: 'networkidle2' });
+
+  // Login
+  await page.waitForSelector('input[name="text"]');
+  await page.type('input[name="text"]', TWITTER_USERNAME);
+  await page.keyboard.press('Enter');
+  await new Promise(resolve => setTimeout(resolve, 2000));
+
+  try {
+    await page.waitForSelector('input[name="text"]', { timeout: 5000 });
+    await page.type('input[name="text"]', TWITTER_USERNAME);
+    await page.keyboard.press('Enter');
+  } catch {}
+
+  await page.waitForSelector('input[name="password"]');
+  await page.type('input[name="password"]', TWITTER_PASSWORD);
+  await page.keyboard.press('Enter');
+  await page.waitForNavigation({ waitUntil: 'networkidle2' });
+
+  await page.goto('https://x.com/marksandspencer', { waitUntil: 'networkidle2' });
+
+  const tweets = new Set();
+  const results = [];
+  let finished = false;
+
+  while (!finished) {
+    const newTweets = await page.evaluate(() => {
+      const nodes = document.querySelectorAll('article');
+      const items = [];
+
+      for (const node of nodes) {
+        try {
+          const urlElem = node.querySelector('a[href*="/status/"]');
+          const url = urlElem ? urlElem.href : '';
+          const dateElem = urlElem?.querySelector('time');
+          const timestamp = dateElem?.getAttribute('datetime') || '';
+
+          const textElem = node.querySelector('[data-testid="tweetText"]');
+          const tweet = textElem?.innerText || '';
+
+          const stats = node.querySelectorAll('[data-testid="app-text-transition-container"]');
+          const replies = stats[0]?.innerText || '0';
+          const retweets = stats[1]?.innerText || '0';
+          const likes = stats[2]?.innerText || '0';
+          const views = stats[3]?.innerText || '0';
+
+          items.push({ tweet, url, timestamp, replies, retweets, likes, views });
+        } catch (e) {
+          console.error('Error parsing tweet:', e);
+        }
+      }
+
+      return items;
+    });
+
+    for (const t of newTweets) {
+      if (!t.url) continue;
+
+      if (!tweets.has(t.url)) {
+        tweets.add(t.url);
+        results.push({
+          Date: t.timestamp ? new Date(t.timestamp).toISOString() : '',
+          Text: t.tweet.replace(/\n/g, ' ').trim(),
+          Replies: t.replies,
+          Retweets: t.retweets,
+          Likes: t.likes,
+          Views: t.views,
+          URL: t.url
+        });
+      }
+
+      if (results.length >= MAX_TWEETS) {
+        finished = true;
+        break;
+      }
+    }
+
+    if (!finished) {
+      await page.evaluate(() => window.scrollBy(0, window.innerHeight));
+      await new Promise(resolve => setTimeout(resolve, 2000));
+    }
+  }
+
+  const ws = XLSX.utils.json_to_sheet(results);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Tweets');
+  XLSX.writeFile(wb, 'nextofrgrddficial_tweets.xlsx');
+
+  console.log(`✅ Scraped ${results.length} tweets`);
+  await browser.close();
+})();
