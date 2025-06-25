@@ -1,0 +1,146 @@
+const puppeteer = require('puppeteer');
+const XLSX      = require('xlsx');
+const fs        = require('fs-extra');
+
+const TWITTER_USERNAME = 'NBhadange10';
+const TWITTER_PASSWORD = 'Nikita@10';
+const MAX_TWEETS       = 2;
+const PROFILE_URL      = 'https://x.com/mastercard';   // feed that includes Amex tweets & replies
+
+function wait(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function loginToTwitter(page) {
+  await page.goto('https://x.com/login', { waitUntil: 'networkidle2' });
+
+  await page.waitForSelector('input[name="text"]');
+  await page.type('input[name="text"]', TWITTER_USERNAME);
+  await page.keyboard.press('Enter');
+  await wait(2000);
+
+  // If Twitter shows the “username again” step, handle it
+  try {
+    await page.waitForSelector('input[name="text"]', { timeout: 5000 });
+    await page.type('input[name="text"]', TWITTER_USERNAME);
+    await page.keyboard.press('Enter');
+  } catch {/* ignore if step isn’t shown */}
+
+  await page.waitForSelector('input[name="password"]');
+  await page.type('input[name="password"]', TWITTER_PASSWORD);
+  await page.keyboard.press('Enter');
+
+  await page.waitForNavigation({ waitUntil: 'networkidle2' });
+}
+
+(async () => {
+  const browser = await puppeteer.launch({
+    headless: false,
+    args: ['--start-maximized'],
+    defaultViewport: null
+  });
+
+  const page = await browser.newPage();
+  await loginToTwitter(page);
+  await page.goto(PROFILE_URL, { waitUntil: 'networkidle2' });
+
+  const tweetsSeen = new Set();
+  const results    = [];
+
+  while (results.length < MAX_TWEETS) {
+    const newTweets = await page.evaluate(() => {
+      const data = [];
+      document.querySelectorAll('article').forEach(node => {
+        try {
+          const urlElem    = node.querySelector('a[href*="/status/"]');
+          const url        = urlElem?.href || '';
+          const timestamp  = urlElem?.querySelector('time')?.getAttribute('datetime') || '';
+          const text       = node.querySelector('[data-testid="tweetText"]')?.innerText || '';
+
+          // Stats order: replies • retweets • likes • views
+          const stats      = node.querySelectorAll('[data-testid="app-text-transition-container"]');
+          const replies    = stats[0]?.innerText || '0';
+          const retweets   = stats[1]?.innerText || '0';
+          const likes      = stats[2]?.innerText || '0';
+          const views      = stats[3]?.innerText || '0';
+
+          const authorAnchor = node.querySelector('a[href^="/"][role="link"]');
+          const authorUsername = authorAnchor ? authorAnchor.getAttribute('href').split('/')[1] : '';
+
+          data.push({ url, timestamp, text, replies, retweets, likes, views, authorUsername});
+        } catch (err) {
+          console.error('Error parsing tweet:', err);
+        }
+      });
+      return data;
+    });
+
+    for (const t of newTweets) {
+  // keep ONLY tweets whose author is AmericanExpress (case-insensitive)
+  if (!t.url || tweetsSeen.has(t.url) || t.authorUsername.toLowerCase() !== 'americanexpress') continue;
+
+  tweetsSeen.add(t.url);
+
+  const cleanedText = t.text.replace(/\n/g, ' ').trim();
+
+// Extract mentions and hashtags
+const mentions = [...cleanedText.matchAll(/@(\w{1,15})/g)].map(m => '@' + m[1]);
+const hashtags = [...cleanedText.matchAll(/#(\w+)/g)].map(h => '#' + h[1]);
+
+  const record = {
+  Date:      t.timestamp,
+  AuthorUsername:  t.authorUsername,
+  Text:      cleanedText,
+  Replies:   t.replies,
+  Retweets:  t.retweets,
+  Likes:     t.likes,
+  Views:     t.views,
+  URL:       t.url
+};
+  mentions.forEach((mention, idx) => {
+  record[`Mention${idx + 1}`] = mention;
+});
+
+// Add Hashtag1, Hashtag2, ...
+hashtags.forEach((hashtag, idx) => {
+  record[`Hashtag${idx + 1}`] = hashtag;
+});
+
+  results.push(record);
+
+console.log(
+`────────── TWEET #${results.length} ──────────
+URL      : ${record.URL}
+Date/Time: ${record.Date}
+Text     : ${record.Text}
+Replies  : ${record.Replies}
+Retweets : ${record.Retweets}
+Likes    : ${record.Likes}
+Views    : ${record.Views}
+AuthorUsername   : ${record.AuthorUsername}
+Mentions : ${mentions.join(', ') || 'None'}
+Hashtags : ${hashtags.join(', ') || 'None'}
+─────────────────────────────────────────────\n`
+);
+
+  if (results.length >= MAX_TWEETS) break;
+}
+
+    if (results.length < MAX_TWEETS) {
+      await page.evaluate(() => window.scrollBy(0, window.innerHeight));
+      await wait(2500);
+    }
+  }
+
+  // Save to Excel
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const filename  = `amex_tweets_${timestamp}.xlsx`;
+
+  const ws = XLSX.utils.json_to_sheet(results);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Tweets');
+  XLSX.writeFile(wb, filename);
+
+  console.log(`✅ Saved ${results.length} American Express tweets to ${filename}`);
+  await browser.close();
+})();
